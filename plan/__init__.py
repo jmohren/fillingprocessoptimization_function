@@ -223,3 +223,5 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         "sequence": sequence,
     }
     return func.HttpResponse(json.dumps(resp), status_code=200, mimetype="application/json")
+
+
