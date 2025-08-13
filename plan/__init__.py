@@ -90,16 +90,23 @@ def score_assignment_quantity(lines_for_combo: List[str],
     return total_qty
 
 
-# ---------- Non-splittable greedy schedule (density + best-fit) ----------
+# ---------- Non-splittable greedy schedule (density + best-fit) w/ start times ----------
 def schedule_orders_greedy_nosplit(
     available_lines: List[str],
     production_orders: List[Dict[str, Any]],
     materials: List[Dict[str, Any]],
     shift_start: datetime,
     shift_length_seconds: int,
-) -> Dict[str, List[str]]:
+) -> Dict[str, List[Dict[str, str]]]:
     """
-    Returns: sequence mapping { line: [order_numbers in scheduled order] }
+    Returns:
+      {
+        line: [
+          {"order_number": "PO-001", "start": "2025-08-13T06:00:00+00:00"},
+          ...
+        ],
+        ...
+      }
     """
     shift_len = int(shift_length_seconds)
     if shift_len <= 0 or not available_lines:
@@ -131,7 +138,7 @@ def schedule_orders_greedy_nosplit(
 
     # Line state
     line_time_used = {ln: 0 for ln in available_lines}
-    per_line_sequence: Dict[str, List[str]] = {ln: [] for ln in available_lines}
+    per_line_sequence: Dict[str, List[Dict[str, str]]] = {ln: [] for ln in available_lines}
 
     for job in enriched:
         dur = job["duration_s"]
@@ -141,8 +148,12 @@ def schedule_orders_greedy_nosplit(
             continue
         # Choose line with MOST remaining capacity
         best_line = max(candidates, key=lambda ln: (shift_len - line_time_used[ln], -line_time_used[ln], ln))
-        # Schedule at the end of current usage (we only need sequence)
-        per_line_sequence[best_line].append(job["order_number"])
+        # Start time = shift_start + used_time on that line
+        start_dt = shift_start + timedelta(seconds=line_time_used[best_line])
+        per_line_sequence[best_line].append({
+            "order_number": job["order_number"],
+            "start": start_dt.isoformat()
+        })
         line_time_used[best_line] += dur
 
     return per_line_sequence
@@ -157,8 +168,8 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
       "employees_available": [{"id": "...","qualifiedLines":[...]}],
       "production_orders": [{"order_number":"...", "material_number":"...", "quantity":int, "time_to_complete":seconds}, ...],
       "materials": [{"material_number":"...", "line":[...]}],
-      "shift_start": "2025-08-13T06:00:00",   # ISO 8601 (optional; default now)
-      "shift_length_seconds": 28800           # e.g., 8*3600
+      "shift_start": "2025-08-13T06:00:00Z",   # ISO 8601 (optional; default now, UTC)
+      "shift_length_seconds": 28800            # e.g., 8*3600
     }
     """
     try:
@@ -187,13 +198,14 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     assignments = employee_assignment(lines_available, employees_available)
 
     if not assignments:
-        resp = {"lines": [], "assignment": {}, "sequence": {}}
+        resp = {"shift_start": shift_start.isoformat(), "lines": [], "assignment": {}, "sequence": {}}
         return func.HttpResponse(json.dumps(resp), status_code=200, mimetype="application/json")
 
-    # 2) Pick the assignment that maximizes theoretical producible quantity (by line availability)
+    # Helper to extract lines from combo
     def lines_from_combo(combo: List[Dict[str, str]]) -> List[str]:
         return [next(iter(d.keys())) for d in combo]
 
+    # 2) Pick assignment maximizing theoretical producible quantity
     best_idx = 0
     best_qty = -1
     for i, combo in enumerate(assignments):
@@ -207,7 +219,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     chosen_lines = lines_from_combo(chosen)
     assignment_map = {list(d.keys())[0]: list(d.values())[0] for d in chosen}
 
-    # 3) Build non-splittable greedy schedule sequence per line
+    # 3) Build non-splittable greedy schedule sequence per line (with order start times)
     sequence = schedule_orders_greedy_nosplit(
         available_lines=chosen_lines,
         production_orders=production_orders,
@@ -216,12 +228,11 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         shift_length_seconds=shift_length_seconds,
     )
 
-    # 4) Simple response
+    # 4) Simple response (including shift_start and order start times)
     resp = {
+        "shift_start": shift_start.isoformat(),
         "lines": sorted(chosen_lines),
         "assignment": assignment_map,
-        "sequence": sequence,
+        "sequence": sequence
     }
     return func.HttpResponse(json.dumps(resp), status_code=200, mimetype="application/json")
-
-
